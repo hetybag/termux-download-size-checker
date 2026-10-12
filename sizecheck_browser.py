@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Termux Download Size Checker - Browser-Based Version
-Handles Cloudflare captcha and instant download links using Selenium
+Termux Download Size Checker - Auto Cloudflare Solver
+Automatically solves Cloudflare captcha verification and detects file size
 Compatible with Android Termux environment
 """
 
@@ -13,13 +13,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from urllib.parse import urlparse
-import subprocess
-import os
+import json
 
 
-class CloudflareBypassChecker:
+class CloudflareAutoBypasser:
     def __init__(self, headless=False):
         self.headless = headless
         self.driver = None
@@ -40,133 +38,194 @@ class CloudflareBypassChecker:
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-plugins")
-            chrome_options.add_argument("--disable-images")
             
-            # Termux-specific: use default Chromium
+            # Android user agent
             chrome_options.add_argument("user-agent=Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             
-            # Try to use system Chromium
             try:
                 self.driver = webdriver.Chrome(options=chrome_options)
-                print("[+] Chrome driver initialized successfully")
+                print("[+] Chrome driver initialized")
                 return True
             except Exception as e:
-                print(f"[!] Failed to initialize Chrome: {e}")
-                print("[*] Trying with chromium-browser...")
-                
-                # Alternative for Termux
-                chrome_options.binary_location = "/data/data/com.termux/files/usr/bin/chromium-browser"
-                self.driver = webdriver.Chrome(options=chrome_options)
-                print("[+] Chromium browser driver initialized successfully")
-                return True
+                print(f"[!] Chrome failed: {e}")
+                return False
                 
         except Exception as e:
             print(f"[!] Error setting up driver: {e}")
-            print("\n[*] To use this script, you need to install chromium in Termux:")
-            print("    pkg install chromium chromium-webview")
             return False
     
-    def wait_for_cloudflare(self, timeout=30):
-        """Wait for Cloudflare challenge to complete"""
+    def click_cloudflare_checkbox(self, timeout=15):
+        """Automatically click the Cloudflare 'I am not a robot' checkbox"""
         try:
-            print("[*] Waiting for Cloudflare verification to complete...")
-            
-            # Wait for the challenge page to disappear
+            print("[*] Looking for Cloudflare challenge checkbox...")
             wait = WebDriverWait(self.driver, timeout)
             
-            # Look for challenge iframe or verification box
-            try:
-                wait.until_not(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "iframe[src*='challenges']")))
-                print("[+] Challenge iframe disappeared")
-            except:
-                pass
+            # Look for common Cloudflare challenge patterns
+            challenge_selectors = [
+                (By.XPATH, "//input[@id='challenge-checkbox']"),
+                (By.XPATH, "//label[@class='cbx']"),
+                (By.XPATH, "//*[contains(text(), 'challenge')]"),
+                (By.CLASS_NAME, "challenge"),
+                (By.CLASS_NAME, "cf-challenge"),
+                (By.ID, "challenge-checkbox"),
+                (By.XPATH, "//iframe[@src[contains(., 'challenges')]]"),
+            ]
             
-            # Wait for page to stabilize after challenge
-            time.sleep(3)
+            for selector_type, selector_value in challenge_selectors:
+                try:
+                    element = self.driver.find_element(selector_type, selector_value)
+                    if element:
+                        print(f"[+] Found challenge element: {selector_value}")
+                        
+                        # Scroll to element
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                        time.sleep(1)
+                        
+                        # Click it
+                        try:
+                            element.click()
+                            print("[+] Clicked challenge checkbox")
+                            return True
+                        except:
+                            # Try JavaScript click
+                            self.driver.execute_script("arguments[0].click();", element)
+                            print("[+] Clicked challenge checkbox (via JS)")
+                            return True
+                except:
+                    continue
             
-            print("[+] Cloudflare verification completed (or timed out)")
+            print("[!] Challenge checkbox not found - waiting for auto-solve...")
+            return False
+            
+        except Exception as e:
+            print(f"[!] Error clicking checkbox: {e}")
+            return False
+    
+    def wait_for_challenge_completion(self, timeout=90):
+        """Wait for Cloudflare challenge to be completed"""
+        try:
+            print("[*] Waiting for Cloudflare challenge to complete...")
+            print(f"[*] (This may take up to {timeout} seconds)\n")
+            
+            wait = WebDriverWait(self.driver, timeout)
+            
+            start_time = time.time()
+            
+            # Monitor page source for challenge indicators
+            while time.time() - start_time < timeout:
+                page_source = self.driver.page_source.lower()
+                current_url = self.driver.current_url.lower()
+                
+                # Check if challenge page is gone
+                if all(keyword not in page_source for keyword in 
+                       ["performing security verification", "cf_challenge", "challenge", "verifying"]):
+                    
+                    if all(keyword not in current_url for keyword in 
+                           ["challenges", "challenge"]):
+                        print("[+] Challenge completed!")
+                        return True
+                
+                # Show progress
+                elapsed = int(time.time() - start_time)
+                print(f"\r[*] Waiting... {elapsed}s", end="", flush=True)
+                
+                time.sleep(1)
+            
+            print("\n[!] Challenge timeout - proceeding anyway")
             return True
             
         except Exception as e:
-            print(f"[!] Error waiting for Cloudflare: {e}")
+            print(f"\n[!] Error waiting for challenge: {e}")
             return False
     
-    def detect_cloudflare_challenge(self):
-        """Detect if page has Cloudflare challenge"""
+    def detect_cloudflare_page(self):
+        """Check if current page is a Cloudflare challenge"""
         try:
+            page_source = self.driver.page_source.lower()
+            title = self.driver.title.lower()
+            
+            cf_keywords = [
+                "performing security verification",
+                "cf_challenge",
+                "cloudflare",
+                "verifying",
+                "protect",
+                "challenge"
+            ]
+            
+            return any(keyword in page_source or keyword in title for keyword in cf_keywords)
+            
+        except:
+            return False
+    
+    def find_download_link_and_size(self):
+        """Find download link and extract file size"""
+        try:
+            print("\n[*] Searching for download link and file size...")
             page_source = self.driver.page_source
             
-            if any(keyword in page_source.lower() for keyword in 
-                   ["performing security verification", "cf_challenge", "cloudflare", "verifying"]):
-                print("[!] Cloudflare security challenge detected")
-                return True
+            # Look for download buttons and links
+            download_selectors = [
+                (By.XPATH, "//a[contains(@href, 'download')]"),
+                (By.XPATH, "//button[contains(text(), 'Download')]"),
+                (By.XPATH, "//a[contains(text(), 'Download')]"),
+                (By.CLASS_NAME, "download-btn"),
+                (By.CLASS_NAME, "download-link"),
+                (By.ID, "download"),
+            ]
             
-            # Check for challenge elements
-            try:
-                self.driver.find_element(By.CLASS_NAME, "cf-challenge")
-                print("[!] Cloudflare challenge element found")
-                return True
-            except:
-                pass
+            download_link = None
+            for selector_type, selector_value in download_selectors:
+                try:
+                    elements = self.driver.find_elements(selector_type, selector_value)
+                    if elements:
+                        for elem in elements:
+                            href = elem.get_attribute("href")
+                            if href and href.startswith("http"):
+                                download_link = href
+                                print(f"[+] Found download link: {href[:80]}...")
+                                break
+                        if download_link:
+                            break
+                except:
+                    continue
             
-            return False
+            # Extract file size from page
+            size = self.extract_size_from_page(page_source)
             
-        except Exception as e:
-            print(f"[!] Error detecting challenge: {e}")
-            return False
-    
-    def get_file_size_from_headers(self):
-        """Extract file size from response headers via browser DevTools"""
-        try:
-            # Get all network requests
-            logs = self.driver.get_log('performance')
-            
-            for log in logs:
-                message = log['message']
-                if 'Network.response' in message or 'Network.request' in message:
-                    try:
-                        data = eval(message.split('{"message":')[1])
-                        if 'message' in data:
-                            msg = data['message']
-                            if 'params' in msg and 'response' in msg['params']:
-                                headers = msg['params']['response'].get('headers', {})
-                                size = headers.get('content-length')
-                                if size:
-                                    return int(size)
-                    except:
-                        pass
-            
-            return None
+            return download_link, size
             
         except Exception as e:
-            print(f"[!] Error extracting from headers: {e}")
-            return None
+            print(f"[!] Error finding download link: {e}")
+            return None, None
     
-    def find_size_in_page(self):
-        """Find file size mentioned in page content"""
+    def extract_size_from_page(self, page_source):
+        """Extract file size from page content"""
         try:
-            page_source = self.driver.page_source
-            
-            # Common patterns for file size display
+            # Common patterns for file size
             patterns = [
-                r'(?:File\s+)?[Ss]ize\s*[:\-]?\s*([0-9.]+\s*(?:B|KB|MB|GB|TB))',
-                r'([0-9.]+\s*(?:B|KB|MB|GB|TB))\s*(?:file|download)',
+                r'(?:File\s+)?[Ss]ize\s*[:\-]?\s*<?([0-9.]+\s*(?:B|KB|MB|GB|TB))',
+                r'[Ss]ize["\']?\s*[:\-]?\s*["\']?([0-9.]+\s*(?:B|KB|MB|GB|TB))["\']?',
                 r'(?:Download|Get)\s+([0-9.]+\s*(?:KB|MB|GB))',
-                r'([0-9]+(?:[.,][0-9]+)?)\s*(bytes|KB|MB|GB|TB)',
-                r'\'size\'\s*:\s*\'?([0-9.]+\s*(?:KB|MB|GB))',
+                r'([0-9.]+\s*(?:B|KB|MB|GB|TB))\s*(?:file|download)',
+                r'data-size=[\'"]*([0-9.]+\s*(?:B|KB|MB|GB|TB))',
+                r'\'size\'\s*:\s*[\'"]*([0-9.]+\s*(?:B|KB|MB|GB|TB))',
+                r'"size"\s*:\s*"?([0-9.]+\s*(?:B|KB|MB|GB|TB))',
+                r'content-length["\']?\s*:\s*[\'"]*([0-9.]+\s*(?:B|KB|MB|GB|TB))',
             ]
             
             for pattern in patterns:
                 match = re.search(pattern, page_source, re.IGNORECASE)
                 if match:
                     size_str = match.group(1)
-                    print(f"[+] Found size in page: {size_str}")
+                    print(f"[+] Found size indicator: {size_str}")
                     return self.parse_size(size_str)
             
+            print("[!] File size not found in page")
             return None
             
         except Exception as e:
-            print(f"[!] Error finding size in page: {e}")
+            print(f"[!] Error extracting size: {e}")
             return None
     
     def parse_size(self, size_str):
@@ -211,69 +270,83 @@ class CloudflareBypassChecker:
             num_bytes /= 1024.0
         return f"{num_bytes:.2f} TB"
     
-    def get_size(self, url, wait_time=45):
-        """Main function to get file size"""
-        print(f"\n[+] Starting browser-based size checker...")
-        print(f"[+] Target URL: {url}\n")
+    def get_size(self, url):
+        """Main function to get file size with auto Cloudflare solving"""
+        print(f"\n{'='*70}")
+        print("  AUTO CLOUDFLARE SOLVER - FILE SIZE DETECTOR")
+        print(f"{'='*70}")
+        print(f"\n[+] Target URL: {url}\n")
         
         if not self.setup_driver():
+            print("[!] Failed to setup Chrome driver")
+            print("\nInstall in Termux:")
+            print("  pkg install chromium chromium-chromedriver")
+            print("  pip install selenium")
             return None, None, "driver-setup-failed"
         
         try:
-            # Navigate to URL
+            # Load the page
             print("[*] Loading page...")
             self.driver.get(url)
             print("[+] Page loaded")
             
-            # Check for Cloudflare challenge
-            if self.detect_cloudflare_challenge():
-                print("[*] Waiting for Cloudflare to verify...")
-                self.wait_for_cloudflare(timeout=wait_time)
-                print("[+] Cloudflare verification passed")
+            # Give page time to render
+            time.sleep(3)
+            
+            # Check if it's a Cloudflare challenge
+            if self.detect_cloudflare_page():
+                print("[!] Cloudflare challenge detected!")
+                print("[*] Attempting to solve challenge...\n")
+                
+                # Try to click the checkbox
+                self.click_cloudflare_checkbox()
+                
+                # Wait for challenge completion
+                self.wait_for_challenge_completion(timeout=90)
+                
+                print("\n[+] Challenge should be completed")
+                time.sleep(3)
             else:
                 print("[+] No Cloudflare challenge detected")
             
-            # Wait for page to fully load
-            time.sleep(3)
-            
-            # Get current URL after all redirects
+            # Get final URL after any redirects
             final_url = self.driver.current_url
-            print(f"[+] Final URL: {final_url}")
+            print(f"\n[+] Final URL: {final_url}")
             
-            # Try to find size in page content
-            print("[*] Searching for file size in page...")
-            size = self.find_size_in_page()
+            # Find download link and size
+            download_link, size = self.find_download_link_and_size()
             
-            if size:
-                return final_url, size, "found-in-page"
-            
-            print("[!] Could not find file size in page content")
-            
-            # Try to extract from network logs
-            print("[*] Checking network headers...")
-            size = self.get_file_size_from_headers()
+            if download_link:
+                print(f"[+] Download link: {download_link[:80]}...")
             
             if size:
-                return final_url, size, "found-in-headers"
-            
-            print("[!] File size not available in headers")
-            
-            return final_url, None, "size-not-available"
+                print(f"[+] File size detected: {self.human_size(size)}")
+                return final_url, size, "success"
+            else:
+                print("[!] Could not detect file size")
+                return final_url, None, "no-size-found"
             
         except Exception as e:
-            print(f"[!] Error during size checking: {e}")
+            print(f"[!] Error: {e}")
+            import traceback
+            traceback.print_exc()
             return url, None, f"error: {str(e)}"
         
         finally:
             if self.driver:
-                print("[*] Closing browser...")
-                self.driver.quit()
+                print("\n[*] Closing browser...")
+                try:
+                    self.driver.quit()
+                except:
+                    pass
     
-    def check_multiple_links(self, file_path, wait_time=45):
+    def check_multiple_links(self, file_path):
         """Check multiple links from a file"""
         try:
             with open(file_path, 'r') as f:
                 links = [line.strip() for line in f if line.strip() and line.strip().startswith('http')]
+            
+            print(f"\n[+] Found {len(links)} links to check\n")
             
             results = []
             for i, link in enumerate(links, 1):
@@ -281,10 +354,10 @@ class CloudflareBypassChecker:
                 print(f"Link {i}/{len(links)}")
                 print(f"{'='*70}")
                 
-                checker = CloudflareBypassChecker(headless=False)
-                final_url, size, status = checker.get_size(link, wait_time=wait_time)
+                final_url, size, status = self.get_size(link)
                 
                 results.append({
+                    'num': i,
                     'original': link,
                     'final': final_url,
                     'size': size,
@@ -293,6 +366,19 @@ class CloudflareBypassChecker:
                 })
                 
                 time.sleep(2)
+            
+            # Print summary
+            print(f"\n\n{'='*70}")
+            print("SUMMARY")
+            print(f"{'='*70}\n")
+            
+            for r in results:
+                status_icon = "✓" if r['size'] else "✗"
+                print(f"[{status_icon}] Link {r['num']}: {r['size_human']}")
+                print(f"    {r['original'][:60]}...")
+                if r['size']:
+                    print(f"    {r['size']:,} bytes")
+                print()
             
             return results
         
@@ -304,81 +390,59 @@ class CloudflareBypassChecker:
 def main():
     if len(sys.argv) < 2:
         print("""
-╔════════════════════════════════════════════════════════════════╗
-║   Download Size Checker - Browser-Based (Cloudflare Support)   ║
-╚════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════╗
+║  AUTO CLOUDFLARE SOLVER - Download Size Detector for Termux        ║
+║  Automatically solves Cloudflare captcha and detects file size      ║
+╚════════════════════════════════════════════════════════════════════╝
 
 USAGE:
   Single URL:   python sizecheck_browser.py <url>
   Multiple:     python sizecheck_browser.py --file <file>
-  Wait time:    python sizecheck_browser.py <url> --wait 60
 
 EXAMPLES:
-  python sizecheck_browser.py "https://new1.filesdl.one/l/file.zip"
-  python sizecheck_browser.py --file links.txt --wait 60
+  python sizecheck_browser.py "https://new1.filesdl.one/l/file123"
+  python sizecheck_browser.py --file links.txt
 
-REQUIREMENTS (Termux):
-  pkg install python python-pip chromium chromium-webview
+REQUIREMENTS (Install in Termux):
+  pkg install chromium chromium-chromedriver python
   pip install selenium
 
+HOW IT WORKS:
+  1. Opens the URL in a Chrome browser
+  2. Detects if Cloudflare challenge is present
+  3. Automatically attempts to solve the challenge
+  4. Extracts file size from the final page
+  5. Reports size in human-readable format
+
 NOTES:
-  • This version uses a real browser to handle Cloudflare challenges
-  • Will open a browser window - let it complete verification
-  • Wait time is how long to wait for Cloudflare (default 45 seconds)
-  • For multiple links, provide a text file with one URL per line
+  • Browser window will open - let it complete
+  • Works with links that show "Performing security verification"
+  • Requires actual Chromium browser on device
+  • Can handle multiple links from a text file
         """)
         sys.exit(1)
     
-    wait_time = 45
-    
-    # Parse --wait argument
-    if "--wait" in sys.argv:
-        wait_idx = sys.argv.index("--wait")
-        if wait_idx + 1 < len(sys.argv):
-            try:
-                wait_time = int(sys.argv[wait_idx + 1])
-                sys.argv.pop(wait_idx)
-                sys.argv.pop(wait_idx)
-            except:
-                pass
-    
-    checker = CloudflareBypassChecker(headless=False)
+    bypasser = CloudflareAutoBypasser(headless=False)
     
     if sys.argv[1] == "--file" and len(sys.argv) > 2:
-        results = checker.check_multiple_links(sys.argv[2], wait_time=wait_time)
-        
-        if results:
-            print(f"\n\n{'='*70}")
-            print("SUMMARY")
-            print(f"{'='*70}")
-            
-            for i, r in enumerate(results, 1):
-                print(f"\n[{i}] {r['status'].upper()}")
-                print(f"    URL: {r['original']}")
-                print(f"    Final: {r['final']}")
-                print(f"    Size: {r['size_human']}")
-                if r['size']:
-                    print(f"    Bytes: {r['size']:,}")
+        bypasser.check_multiple_links(sys.argv[2])
     else:
         url = sys.argv[1]
-        final_url, size, status = checker.get_size(url, wait_time=wait_time)
+        final_url, size, status = bypasser.get_size(url)
         
         print(f"\n{'='*70}")
-        print("RESULT")
+        print("FINAL RESULT")
         print(f"{'='*70}")
-        print(f"Original URL: {url}")
+        print(f"Status: {status.upper()}")
+        print(f"Original: {url}")
         print(f"Final URL: {final_url}")
-        print(f"Status: {status}")
         
         if size is not None:
-            human = checker.human_size(size)
-            print(f"Size: {human} ({size:,} bytes)")
+            human = bypasser.human_size(size)
+            print(f"FILE SIZE: {human}")
+            print(f"Bytes: {size:,}")
         else:
-            print("Size: Could not be determined")
-            print("\nPossible reasons:")
-            print("  • Size not displayed on page")
-            print("  • Page requires additional interaction")
-            print("  • Dynamic content loaded via JavaScript")
+            print("FILE SIZE: Could not be determined")
 
 
 if __name__ == "__main__":
